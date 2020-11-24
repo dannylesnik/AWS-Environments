@@ -1,0 +1,92 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: itop
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: list-services-account
+  namespace: itop
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: list-services-clusterrole
+rules:
+- apiGroups: [""]
+  resources: ["*"]
+  verbs: ["get", "watch", "list"]
+    # Allow actions on Endpoints
+- apiGroups: [""]
+  resources: ["endpoints"]
+  verbs: [ "watch", "get", "list"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+    name: list-services-clusterrolebinding
+    namespace: itop
+subjects:
+- kind: ServiceAccount
+  name: list-services-account
+  namespace: itop
+roleRef:
+  kind: ClusterRole
+  name: list-services-clusterrole
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-version-info
+  namespace: itop
+  labels:
+    app: service-version-info
+spec:
+  selector:
+    matchLabels:
+      app: service-version-info
+  replicas: 2
+  minReadySeconds: 10
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: service-version-info
+    spec:
+      serviceAccountName: list-services-account
+      containers:
+      - name: service-version-info
+        image: dannylesnik/service-version-info:1.1.21
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "96Mi"
+            cpu: "100m"
+        env:
+          - name: API_INFO_URI
+            value: "api/info"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-info-service
+  namespace: itop
+spec:
+  type: NodePort
+  ports:
+    - name: http-tcp
+      port: 8080
+      nodePort: 30080
+      protocol: TCP
+  selector:
+    app: service-version-info
