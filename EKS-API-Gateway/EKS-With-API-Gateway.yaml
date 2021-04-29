@@ -199,6 +199,14 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
 
+  MyInstanceProfile: 
+    Type: "AWS::IAM::InstanceProfile"
+    Properties: 
+      Path: "/"
+      Roles: 
+        - 
+          Ref: CFEksNodeInstanceRole
+
   CFEksNodeInstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -215,19 +223,7 @@ Resources:
                 - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
                 - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
       Path: /
-
-  EKSMasterSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      VpcId: !Ref VPC
-      GroupName: 'EKS-Master-SG'
-      GroupDescription: Open Port 443
-      SecurityGroupIngress:
-      - IpProtocol: tcp
-        FromPort: '443'
-        ToPort: '443'
-        CidrIp: !Ref MyIP
-
+  
   MyCluster:
     Type: 'AWS::EKS::Cluster'
     Properties:
@@ -239,30 +235,85 @@ Resources:
         - Arn
       ResourcesVpcConfig:
         SecurityGroupIds:
-          - !Ref EKSMasterSecurityGroup
+          - !Ref ControlPlaneSecurityGroup
         SubnetIds:
           - !Ref PublicSubnetA
           - !Ref PublicSubnetB
           - !Ref PrivateSubnetB
           - !Ref PrivateSubnetA
+
+  EKSNodegroupLaunchTaemplate:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn: 
+      - ClusterSharedNodeSecurityGroup
+      - SG
+      - MyCluster
+    Properties:
+      LaunchTemplateName: 'EKSNodegroupLaunchTaemplate'
+      LaunchTemplateData:
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            Groups: 
+              - !GetAtt ClusterSharedNodeSecurityGroup.GroupId
+              - !GetAtt SG.GroupId
+        TagSpecifications:
+          - ResourceType: 'instance'
+            Tags: 
+              - Key: 'sample-custom-tag-key'
+                Value: 'sample-custom-tag-value' 
+              - Key: 'eks:cluster-name'
+                Value: 'POC-Cluster'
+              - Key: 'eks:nodegroup-name'
+                Value: 'spot-node-group-4GB'
+
+  DataProcessingNodegroupLaunchTaemplate:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn: 
+      - ClusterSharedNodeSecurityGroup
+      - SG
+      - MyCluster
+    Properties:
+      LaunchTemplateName: 'DataProcessingNodegroupLaunchTaemplate'
+      LaunchTemplateData:
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            Groups: 
+              - !GetAtt ClusterSharedNodeSecurityGroup.GroupId
+              - !GetAtt SG.GroupId
+        TagSpecifications:
+          - ResourceType: 'instance'
+            Tags: 
+              - Key: 'eks:cluster-name'
+                Value: 'POC-Cluster'
+              - Key: 'eks:nodegroup-name'
+                Value: 'spot-node-group-32GB'
+              - Key: 'eks:data-process'
+                Value: 'true'
           
-  EKSNodegroup:
+  EksNodeGroup:
     Type: 'AWS::EKS::Nodegroup'
-    DependsOn: [ MyCluster, EventRule]
+    DependsOn: MyCluster
     Properties:
       ClusterName: POC-Cluster
+      CapacityType: SPOT
+      LaunchTemplate:
+        Id: !Ref EKSNodegroupLaunchTaemplate
+        Version: !GetAtt EKSNodegroupLaunchTaemplate.LatestVersionNumber
       InstanceTypes: 
+        - 'c5.large'
+        - 'c5a.large'
+        - 'c5ad.large'
+        - 'c5d.large'
+        - 't2.medium'
         - 't3.medium'
+        - 't3a.medium'
       AmiType: 'AL2_x86_64'
-      NodegroupName: 'test-group'
-      NodeRole:
-        !GetAtt
-        - CFEksNodeInstanceRole
-        - Arn 
+      NodegroupName: 'spot-node-group-4GB'
+      NodeRole: !GetAtt CFEksNodeInstanceRole.Arn 
       ScalingConfig:
         MinSize: 2
-        DesiredSize: 2
-        MaxSize: 2
+        DesiredSize: 4
+        MaxSize: 18
       Subnets:
         - !Ref PrivateSubnetB
         - !Ref PrivateSubnetA
@@ -407,15 +458,6 @@ Resources:
       TracingConfig:
         Mode: Active
 
-  IsAliveResource:
-    Type: 'AWS::ApiGateway::Resource'
-    Properties:
-      RestApiId: !Ref RestApi
-      ParentId: !GetAtt 
-      - RestApi
-      - RootResourceId
-      PathPart: isalive
-
   GetNodesResource:
     Type: 'AWS::ApiGateway::Resource'
     Properties:
@@ -425,7 +467,43 @@ Resources:
       - RootResourceId
       PathPart: getnodes  
 
-  GetInfoResource:
+  GetNodesMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref MyVpcLink
+        IntegrationHttpMethod: GET
+        PassthroughBehavior: WHEN_NO_MATCH
+        TimeoutInMillis: 29000
+        Type: HTTP
+        Uri: !Join ['', ["http://", !GetAtt "NetworkLoadBalancer.DNSName", "/getnodes" ]]
+      OperationName: 'GetNodes'
+      ResourceId: !Ref GetNodesResource
+      RestApiId: !Ref RestApi
+
+  GetInfoApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref MyVpcLink
+        IntegrationHttpMethod: GET
+        PassthroughBehavior: WHEN_NO_MATCH
+        TimeoutInMillis: 29000
+        Type: HTTP
+        Uri: !Join ['', ["http://", !GetAtt "NetworkLoadBalancer.DNSName", "/getinfo" ]]
+      OperationName: 'GetInfo'
+      ResourceId: !Ref GetInfoApiResource
+      RestApiId: !Ref RestApi
+      
+  GetInfoApiResource:
     Type: 'AWS::ApiGateway::Resource'
     Properties:
       RestApiId: !Ref RestApi
@@ -433,6 +511,24 @@ Resources:
       - RestApi
       - RootResourceId
       PathPart: getinfo  
+
+
+  ApiV1Stage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref ApiGatewayDeployment
+      Description: 'k8s api v1'
+      RestApiId: !Ref RestApi
+      StageName: 'v1'
+
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: 
+      - GetInfoApiMethod
+      - GetNodesMethod 
+    Properties:
+      Description: V1 API Deployment
+      RestApiId: !Ref RestApi
 
   EventRule: 
     Type: AWS::Events::Rule
@@ -464,4 +560,176 @@ Resources:
           - "EventRule"
           - "Arn"
 
+### From eksctl yaml
 
+
+  SG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: >-
+        Communication between the control plane and worker nodes in group
+        ng-104a50f2
+      Tags:
+        - Key: kubernetes.io/cluster/eksworkshop-blog
+          Value: owned
+        - Key: Name
+          Value: !Sub '${AWS::StackName}/SG'
+      VpcId: !Ref VPC
+
+  ClusterSharedNodeSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Communication between all nodes in the cluster
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '30080'
+        ToPort: '30080'
+        CidrIp: !GetAtt VPC.CidrBlock
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}/ClusterSharedNodeSecurityGroup'
+      VpcId: !Ref VPC
+
+  ControlPlaneSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Communication between the control plane and worker nodegroups
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}/ControlPlaneSecurityGroup'
+      VpcId: !Ref VPC
+
+  IngressDefaultClusterToNodeSG:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      Description: >-
+        Allow managed and unmanaged nodes to communicate with each other (all
+        ports)
+      FromPort: 0
+      GroupId: !Ref ClusterSharedNodeSecurityGroup
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !GetAtt 
+        - MyCluster
+        - ClusterSecurityGroupId
+      ToPort: 65535
+
+  IngressInterNodeGroupSG:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      Description: Allow nodes to communicate with each other (all ports)
+      FromPort: 0
+      GroupId: !Ref ClusterSharedNodeSecurityGroup
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref ClusterSharedNodeSecurityGroup
+      ToPort: 65535
+
+  IngressNodeToDefaultClusterSG:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      Description: Allow unmanaged nodes to communicate with control plane (all ports)
+      FromPort: 0
+      GroupId: !GetAtt 
+        - MyCluster
+        - ClusterSecurityGroupId
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref ClusterSharedNodeSecurityGroup
+      ToPort: 65535
+
+  EgressInterCluster:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      Description: >-
+        Allow control plane to communicate with worker nodes in group
+        ng-104a50f2 (kubelet and workload TCP ports)
+      DestinationSecurityGroupId: !Ref SG
+      FromPort: 1025
+      GroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: tcp
+      ToPort: 65535
+
+  EgressInterClusterAPI:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      Description: >-
+        Allow control plane to communicate with worker nodes in group
+        ng-104a50f2 (workloads using HTTPS port, commonly used with extension
+        API servers)
+      DestinationSecurityGroupId: !Ref SG
+      FromPort: 443
+      GroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: tcp
+      ToPort: 443
+
+  IngressInterCluster:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      Description: >-
+        Allow worker nodes in group ng-104a50f2 to communicate with control
+        plane (kubelet and workload TCP ports)
+      FromPort: 1025
+      GroupId: !Ref SG
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref ControlPlaneSecurityGroup
+      ToPort: 65535
+
+  IngressInterClusterAPI:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      Description: >-
+        Allow worker nodes in group ng-104a50f2 to communicate with control
+        plane (workloads using HTTPS port, commonly used with extension API
+        servers)
+      FromPort: 443
+      GroupId: !Ref SG
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref ControlPlaneSecurityGroup
+      ToPort: 443
+
+  IngressInterClusterCP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      Description: >-
+        Allow control plane to receive API requests from worker nodes in group
+        ng-104a50f2
+      FromPort: 443
+      GroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref SG
+      ToPort: 443
+
+  ElasticacheSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Elasticache Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '6379'
+          ToPort: '6379'
+          CidrIp: 0.0.0.0/0
+
+  SubnetGroup:
+    Type: 'AWS::ElastiCache::SubnetGroup'
+    Properties:
+      Description: Subnet Group for Example Replication Group
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+
+  ReplicationGroup:
+    Type: 'AWS::ElastiCache::ReplicationGroup'
+    Properties:
+        AutomaticFailoverEnabled: 'true'
+        CacheNodeType: 'cache.m5.large'
+        CacheSubnetGroupName: !Ref SubnetGroup
+        Engine: redis
+        NumCacheClusters: 2
+        Port: '6379'
+        PreferredMaintenanceWindow: 'sun:22:00-sun:23:30'
+        ReplicationGroupDescription: 'Sample replication group'
+        SecurityGroupIds:
+        - !GetAtt 
+            - ElasticacheSecurityGroup
+            - GroupId
+        SnapshotRetentionLimit: '7'
+        SnapshotWindow: '05:00-09:00'

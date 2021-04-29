@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Creates VPC with 2 public, 2 private subs. Creates EKS cluster with Managed Node Group based on Spot instances and add customer Tags on each instance." 
+
+Parameters:
+  MyIP:
+    Type: String
+    Description: "Inbound rules from outside world would be liminite to this ip (just google 'What is my IP' and put here the result -:) )"
+Resources:
+
+# First, a VPC:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value:  !Join ['', [!Ref "AWS::StackName", "-VPC" ]]
+
+# Our VPC will need internet access:     
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: VPC
+  
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    # Notice how you can't attach an IGW to a VPC unless both are created:
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 0, !GetAZs ]    # Get the first AZ in the list        
+      Tags:
+      - Key: Name
+        Value: !Join ["-",[10.0.1.0/24, Public-A]] 
+      - Key: 'kubernetes.io/role/elb'
+        Value: '1'
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.3.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 1, !GetAZs ]    # Get the first AZ in the list        
+      Tags:
+      - Key: Name
+        Value: !Join ["-",[10.0.3.0/24, Public-B]] 
+      - Key: 'kubernetes.io/role/elb'
+        Value: '1'
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs ]    # Get the first AZ in the list  
+      Tags:
+      - Key: Name
+        Value: !Join ["-",[10.0.2.0/24, Private-A]] 
+      - Key: 'kubernetes.io/role/internal-elb'
+        Value: '1'
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs ]    # Get the second AZ in the list  
+      Tags:
+      - Key: Name
+        Value: !Join ["-",[10.0.4.0/24, Private-B]] 
+      - Key: 'kubernetes.io/role/internal-elb'
+        Value: '1'
+
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: Public
+
+  PublicRoute1:   # Public route table has direct routing to IGW:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  NATGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties: 
+      AllocationId: !GetAtt ElasticIPAddressA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags: 
+      - Key: Name
+        Value: NatGateway-Subnet-A
+
+  ElasticIPAddressA:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NATGatewayB:
+    Type: AWS::EC2::NatGateway
+    Properties: 
+      AllocationId: !GetAtt ElasticIPAddressB.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags: 
+      - Key: Name
+        Value: NatGateway-Subnet-B
+
+  ElasticIPAddressB:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    DependsOn: NATGatewayA
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: RouteTable-Private-A
+
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    DependsOn: NATGatewayB
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: RouteTable-Private-B
+
+  PrivateRouteA:            # Private route table can access web via NAT (created below)
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      # Route traffic through the NAT Gateway:
+      NatGatewayId: !Ref NATGatewayA
+
+  PrivateRouteB:            # Private route table can access web via NAT (created below)
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayB
+
+  PrivateSubnetARouteTableAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTableA
+
+  PrivateSubnetARouteTableAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTableB
+
+  CFEksClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 'Cf-Eks-Cluster-Role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ['eks.amazonaws.com']
+          Action: ['sts:AssumeRole']
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  CFEksNodeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 'Cf-Eks-node-Instance-Role'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ['ec2.amazonaws.com']
+          Action: ['sts:AssumeRole']
+      ManagedPolicyArns:
+                - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+                - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+                - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Path: /
+
+  EKSMasterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: 'EKS-Master-SG'
+      GroupDescription: Open Port 443
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '443'
+        ToPort: '443'
+        CidrIp: !Join ['', [!Ref MyIP, '/32' ]] 
+
+  MyCluster:
+    Type: 'AWS::EKS::Cluster'
+    Properties:
+      Name: POC-Cluster
+      Version: '1.15'
+      RoleArn: 
+        !GetAtt 
+        - CFEksClusterRole
+        - Arn
+      ResourcesVpcConfig:
+        SecurityGroupIds:
+          - !Ref EKSMasterSecurityGroup
+        SubnetIds:
+          - !Ref PublicSubnetA
+          - !Ref PublicSubnetB
+          - !Ref PrivateSubnetB
+          - !Ref PrivateSubnetA
+
+  EKSNodegroupLaunchTaemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: 'EKSNodegroupLaunchTaemplate'
+      LaunchTemplateData:
+        TagSpecifications:
+          - ResourceType: 'instance'
+            Tags: 
+              - Key: 'sample-custom-tag-key'
+                Value: 'sample-custom-tag-value'
+          
+  EksNodeGroup:
+    Type: 'AWS::EKS::Nodegroup'
+    DependsOn: MyCluster
+    Properties:
+      ClusterName: POC-Cluster
+      CapacityType: SPOT
+      LaunchTemplate:
+          Id: !Ref EKSNodegroupLaunchTaemplate
+          Version: !GetAtt EKSNodegroupLaunchTaemplate.DefaultVersionNumber
+      InstanceTypes: 
+        - 'c5.large'
+        - 'c5a.large'
+        - 'c5ad.large'
+        - 'c5d.large'
+        - 't2.medium'
+        - 't3.medium'
+        - 't3a.medium'
+      AmiType: 'AL2_x86_64'
+      NodegroupName: 'spot-node-group-4GB'
+      NodeRole:
+        !GetAtt
+        - CFEksNodeInstanceRole
+        - Arn 
+      ScalingConfig:
+        MinSize: 2
+        DesiredSize: 4
+        MaxSize: 18
+      Subnets:
+        - !Ref PrivateSubnetB
+        - !Ref PrivateSubnetA
+
+Outputs:
+  RbackRoleArn:
+    Description: 'VPC default security group ID. Required for Spot Diversification Lambda.' 
+    Value:  !GetAtt 'VPC.DefaultSecurityGroup'
+  ClusterConfigCommand :
+    Description: 'Command to Connect to Cluster.' 
+    Value:  !Join [' ', ['aws eks --region', !Ref 'AWS::Region', 'update-kubeconfig --name' ,!Ref 'MyCluster']]
